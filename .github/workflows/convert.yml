@@ -1,0 +1,64 @@
+name: Convert Parakeet to ONNX
+
+on:
+  workflow_dispatch:
+    inputs:
+      model_version:
+        description: 'Model version (v2 or v3)'
+        required: true
+        default: 'v2'
+        type: choice
+        options:
+          - v2
+          - v3
+  schedule:
+    - cron: '0 0 1 * *'  # Monthly check for new models
+
+jobs:
+  convert:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run conversion
+        run: python convert.py --version ${{ inputs.model_version || 'v2' }}
+
+      - name: List output artifacts
+        run: ls -lh output/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            output/*.onnx
+            output/*.json
+          tag_name: parakeet-${{ inputs.model_version || 'v2' }}-${{ github.run_number }}
+          name: Parakeet TDT ${{ inputs.model_version || 'v2' }} (Build ${{ github.run_number }})
+          body: |
+            ONNX export of NVIDIA Parakeet TDT model (${{ inputs.model_version || 'v2' }}).
+
+            **Model source:** HuggingFace
+            **Format:** ONNX (opset 17)
+            **Target:** ONNX Runtime (VoiceMate Windows)
+
+            ## Files
+            - `preprocessor.onnx` — Audio → Mel spectrogram
+            - `encoder.onnx` — FastConformer encoder
+            - `decoder.onnx` — TDT prediction network
+            - `joint.onnx` — Joint decision network
+            - `vocabulary.json` — SentencePiece token vocabulary
+            - `config.json` — Model metadata
+          draft: false
+          prerelease: false
