@@ -302,9 +302,12 @@ def embed_external_weights(export_dir: Path):
 
     NeMo's export() may produce ONNX files with external data tensors
     (separate .data files or individual tensor files). This function
-    detects external data references, loads the weights, and re-saves
-    with everything embedded in the protobuf.
+    detects external data references, loads the weights, quantizes to
+    FP16 if needed (GitHub Release 2GB limit), and re-saves with
+    everything embedded in the protobuf.
     """
+    from onnxconverter_common import float16
+
     onnx_files = list(export_dir.glob("*.onnx"))
     if not onnx_files:
         return
@@ -337,33 +340,63 @@ def embed_external_weights(export_dir: Path):
             print(f"       {onnx_path.name}: could not load external data ({e})")
             continue
 
+        # Estimate embedded size (sum of all initializer raw data)
+        total_bytes = sum(
+            len(t.raw_data) + len(t.float_data) * 4 + len(t.double_data) * 8
+            for t in model.graph.initializer
+        )
+        gh_release_limit = 2_000_000_000  # 2GB GitHub Release limit
+
+        if total_bytes > gh_release_limit:
+            print(f"       {onnx_path.name}: {total_bytes/1e9:.1f}GB > 2GB limit, quantizing to FP16...")
+            try:
+                model = float16.convert_float_to_float16(
+                    model, keep_io_types=True, disable_shape_infer=True
+                )
+                print(f"       {onnx_path.name}: quantized to FP16")
+            except Exception as e:
+                print(f"       FP16 quantization failed ({e}), saving with external data...")
+                # Fallback: single external data file
+                data_file = onnx_path.name + ".data"
+                onnx.save_model(
+                    model, str(onnx_path),
+                    save_as_external_data=True,
+                    all_tensors_to_one_file=True,
+                    location=data_file,
+                    size_threshold=0,
+                )
+                print(f"       {onnx_path.name}: saved with external {data_file}")
+                del model
+                continue
+
         # Re-save with all data embedded
         embedded_path = onnx_path.with_suffix(".embedded.onnx")
         try:
             onnx.save_model(model, str(embedded_path), save_as_external_data=False)
-            # Replace the original
             embedded_path.replace(onnx_path)
             print(f"       {onnx_path.name}: embedded ({onnx_path.stat().st_size / 1e6:.1f} MB)")
-        except ValueError as e:
-            # Protobuf has a 2GB limit — if the model is too large, keep external
-            if "2GB" in str(e) or "too large" in str(e).lower():
-                print(f"       {onnx_path.name}: >2GB, keeping external data")
+        except Exception as e:
+            if "2GB" in str(e) or "too large" in str(e).lower() or "protobuf" in str(e).lower():
+                print(f"       {onnx_path.name}: still >2GB after FP16, using external data")
                 if embedded_path.exists():
                     embedded_path.unlink()
+                data_file = onnx_path.name + ".data"
+                onnx.save_model(
+                    model, str(onnx_path),
+                    save_as_external_data=True,
+                    all_tensors_to_one_file=True,
+                    location=data_file,
+                    size_threshold=0,
+                )
+                print(f"       {onnx_path.name}: saved with external {data_file}")
             else:
                 raise
         del model
 
-    # Clean up external data files (tensor files, .data files)
+    # Clean up individual external tensor files (NOT consolidated .data files)
     for f in list(export_dir.iterdir()):
-        if f.suffix == ".data":
-            f.unlink()
-            print(f"       Cleaned up: {f.name}")
-        elif (f.is_file() and f.suffix == "" and f.suffix != ".onnx"
-              and f.name not in ("Makefile", "LICENSE")
-              and not f.name.startswith(".")
-              and not f.name.endswith(".json")):
-            # Likely an external tensor file (no extension, not a known file)
+        if f.is_file() and f.suffix == "" and f.name not in ("Makefile", "LICENSE") \
+                and not f.name.startswith(".") and not f.name.endswith(".json"):
             if f.stat().st_size > 0:
                 f.unlink()
                 print(f"       Cleaned up: {f.name}")
