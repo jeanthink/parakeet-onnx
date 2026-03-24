@@ -19,6 +19,8 @@ import shutil
 import sys
 from pathlib import Path
 
+import onnx
+
 # Model registry: version → HuggingFace model ID
 MODELS = {
     "v2": "nvidia/parakeet-tdt-0.6b-v2",
@@ -295,8 +297,75 @@ def export_vocabulary(model, export_dir: Path):
     print(f"       Saved: {config_path}")
 
 
+def embed_external_weights(export_dir: Path):
+    """Post-process ONNX files to embed external weight data.
+
+    NeMo's export() may produce ONNX files with external data tensors
+    (separate .data files or individual tensor files). This function
+    loads each ONNX file with its external data and re-saves with all
+    weights embedded directly in the protobuf, then cleans up the
+    external files.
+    """
+    onnx_files = list(export_dir.glob("*.onnx"))
+    if not onnx_files:
+        return
+
+    print("[Post] Embedding external weights into ONNX files...")
+
+    for onnx_path in onnx_files:
+        try:
+            model = onnx.load(str(onnx_path), load_external_data=True)
+        except Exception as e:
+            print(f"       Skipping {onnx_path.name}: could not load ({e})")
+            continue
+
+        has_external = any(
+            tensor.HasField("data_location")
+            and tensor.data_location == onnx.TensorProto.EXTERNAL
+            for tensor in model.graph.initializer
+        )
+        if not has_external:
+            print(f"       {onnx_path.name}: weights already embedded — skipping")
+            continue
+
+        # Re-save with all data embedded
+        embedded_path = onnx_path.with_suffix(".embedded.onnx")
+        try:
+            onnx.save_model(model, str(embedded_path), save_as_external_data=False)
+            # Replace the original
+            embedded_path.replace(onnx_path)
+            print(f"       {onnx_path.name}: embedded ({onnx_path.stat().st_size / 1e6:.1f} MB)")
+        except ValueError as e:
+            # Protobuf has a 2GB limit — if the model is too large, keep external
+            if "2GB" in str(e) or "too large" in str(e).lower():
+                print(f"       {onnx_path.name}: >2GB, keeping external data")
+                if embedded_path.exists():
+                    embedded_path.unlink()
+            else:
+                raise
+
+    # Clean up external data files (tensor files, .data files)
+    for f in export_dir.iterdir():
+        if f.suffix in (".data", ".weight") or (
+            f.is_file() and f.suffix == "" and f.name not in ("Makefile",)
+            and not f.name.startswith(".")
+            and f.name != "LICENSE"
+        ):
+            # Check if it looks like an external tensor file (no extension, not a known file)
+            try:
+                # If file is not JSON, ONNX, or known format, it's likely a tensor file
+                if f.suffix == "" and f.stat().st_size > 0:
+                    f.unlink()
+                    print(f"       Cleaned up external file: {f.name}")
+                elif f.suffix == ".data":
+                    f.unlink()
+                    print(f"       Cleaned up external file: {f.name}")
+            except Exception:
+                pass
+
+
 def convert(version: str):
-    """Full conversion pipeline: download → export using NeMo's native ONNX export."""
+    """Full conversion pipeline: download → export → embed weights."""
     if version not in MODELS:
         print(f"Error: Unknown version '{version}'. Available: {', '.join(MODELS.keys())}")
         sys.exit(1)
@@ -321,7 +390,6 @@ def convert(version: str):
     except Exception as e:
         print(f"       NeMo export() failed: {e}")
         print("       Trying manual torch.onnx.export fallback...")
-        # Fallback: export the full model as a single ONNX
         import torch
         model.eval()
         model.freeze()
@@ -334,7 +402,6 @@ def convert(version: str):
         except Exception as e2:
             print(f"       Fallback also failed: {e2}")
             print("       Attempting component-level export...")
-            # Last resort: try exporting encoder only
             try:
                 encoder_path = str(export_dir / "encoder.onnx")
                 model.encoder.export(encoder_path)
@@ -343,14 +410,18 @@ def convert(version: str):
                 print(f"       All export methods failed: {e3}")
                 sys.exit(1)
 
+    # Embed external weights into ONNX files (fixes 2MB encoder issue)
+    embed_external_weights(export_dir)
+
     # Export vocabulary
     export_vocabulary(model, export_dir)
 
     # Copy outputs to flat output/ for GitHub Actions release
     for f in export_dir.iterdir():
-        dest = OUTPUT_DIR / f.name
-        if dest != f:
-            shutil.copy2(f, dest)
+        if f.is_file():
+            dest = OUTPUT_DIR / f.name
+            if dest != f:
+                shutil.copy2(f, dest)
 
     print()
     print("Conversion complete!")
@@ -358,8 +429,9 @@ def convert(version: str):
     print()
     print("Files:")
     for f in sorted(export_dir.iterdir()):
-        size_mb = f.stat().st_size / 1e6
-        print(f"  {f.name} ({size_mb:.1f} MB)")
+        if f.is_file():
+            size_mb = f.stat().st_size / 1e6
+            print(f"  {f.name} ({size_mb:.1f} MB)")
 
 
 def main():

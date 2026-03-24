@@ -46,20 +46,19 @@ jobs:
           files: |
             output/*.onnx
             output/*.json
+            output/*.data
           tag_name: parakeet-${{ inputs.model_version || 'v2' }}-${{ github.run_number }}
           name: Parakeet TDT ${{ inputs.model_version || 'v2' }} (Build ${{ github.run_number }})
           body: |
             ONNX export of NVIDIA Parakeet TDT model (${{ inputs.model_version || 'v2' }}).
 
             **Model source:** HuggingFace
-            **Format:** ONNX (opset 17)
+            **Format:** ONNX (opset 17, weights embedded)
             **Target:** ONNX Runtime (VoiceMate Windows)
 
             ## Files
-            - `preprocessor.onnx` — Audio → Mel spectrogram
-            - `encoder.onnx` — FastConformer encoder
-            - `decoder.onnx` — TDT prediction network
-            - `joint.onnx` — Joint decision network
+            - `encoder-model.onnx` — FastConformer encoder (weights embedded)
+            - `decoder_joint-model.onnx` — TDT decoder + joint network
             - `vocabulary.json` — SentencePiece token vocabulary
             - `config.json` — Model metadata
           draft: false
