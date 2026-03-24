@@ -45,6 +45,11 @@ def download_model(version: str):
     hf_id = MODELS[version]
     hf_token = os.environ.get("HF_TOKEN")
 
+    # NeMo uses huggingface_hub internally — set the token via login() if provided
+    if hf_token:
+        from huggingface_hub import login
+        login(token=hf_token, add_to_git_credential=False)
+
     print(f"[1/5] Downloading model: {hf_id}")
     print(f"       This may take several minutes on first run...")
 
@@ -52,7 +57,6 @@ def download_model(version: str):
         model = nemo_asr.models.ASRModel.from_pretrained(
             model_name=hf_id,
             map_location="cpu",
-            token=hf_token,
         )
         print(f"       Model loaded: {type(model).__name__}")
         return model
