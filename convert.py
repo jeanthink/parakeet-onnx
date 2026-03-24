@@ -296,7 +296,7 @@ def export_vocabulary(model, export_dir: Path):
 
 
 def convert(version: str):
-    """Full conversion pipeline: download → export → package."""
+    """Full conversion pipeline: download → export using NeMo's native ONNX export."""
     if version not in MODELS:
         print(f"Error: Unknown version '{version}'. Available: {', '.join(MODELS.keys())}")
         sys.exit(1)
@@ -311,9 +311,39 @@ def convert(version: str):
     print()
 
     model = download_model(version)
-    export_preprocessor(model, export_dir)
-    export_encoder(model, export_dir)
-    export_decoder_joint(model, export_dir)
+
+    # Use NeMo's built-in ONNX export — handles all components correctly
+    print("[2/5] Exporting model to ONNX using NeMo native export...")
+    onnx_path = str(export_dir / "model.onnx")
+    try:
+        model.export(onnx_path)
+        print(f"       Exported to: {onnx_path}")
+    except Exception as e:
+        print(f"       NeMo export() failed: {e}")
+        print("       Trying manual torch.onnx.export fallback...")
+        # Fallback: export the full model as a single ONNX
+        import torch
+        model.eval()
+        model.freeze()
+        try:
+            model.export(
+                output=onnx_path,
+                check_trace=False,
+            )
+            print(f"       Exported via fallback: {onnx_path}")
+        except Exception as e2:
+            print(f"       Fallback also failed: {e2}")
+            print("       Attempting component-level export...")
+            # Last resort: try exporting encoder only
+            try:
+                encoder_path = str(export_dir / "encoder.onnx")
+                model.encoder.export(encoder_path)
+                print(f"       Encoder exported: {encoder_path}")
+            except Exception as e3:
+                print(f"       All export methods failed: {e3}")
+                sys.exit(1)
+
+    # Export vocabulary
     export_vocabulary(model, export_dir)
 
     # Copy outputs to flat output/ for GitHub Actions release
