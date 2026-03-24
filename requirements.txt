@@ -1,5 +1,6 @@
 torch>=2.1.0
 onnx>=1.15.0
+onnxscript>=0.1.0
 nemo_toolkit[asr]>=2.0.0
 huggingface_hub>=0.20.0
 sentencepiece>=0.2.0
