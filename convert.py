@@ -302,9 +302,8 @@ def embed_external_weights(export_dir: Path):
 
     NeMo's export() may produce ONNX files with external data tensors
     (separate .data files or individual tensor files). This function
-    loads each ONNX file with its external data and re-saves with all
-    weights embedded directly in the protobuf, then cleans up the
-    external files.
+    detects external data references, loads the weights, and re-saves
+    with everything embedded in the protobuf.
     """
     onnx_files = list(export_dir.glob("*.onnx"))
     if not onnx_files:
@@ -313,8 +312,9 @@ def embed_external_weights(export_dir: Path):
     print("[Post] Embedding external weights into ONNX files...")
 
     for onnx_path in onnx_files:
+        # Load WITHOUT external data first to check for external references
         try:
-            model = onnx.load(str(onnx_path), load_external_data=True)
+            model_check = onnx.load(str(onnx_path), load_external_data=False)
         except Exception as e:
             print(f"       Skipping {onnx_path.name}: could not load ({e})")
             continue
@@ -322,10 +322,19 @@ def embed_external_weights(export_dir: Path):
         has_external = any(
             tensor.HasField("data_location")
             and tensor.data_location == onnx.TensorProto.EXTERNAL
-            for tensor in model.graph.initializer
+            for tensor in model_check.graph.initializer
         )
+        del model_check
+
         if not has_external:
             print(f"       {onnx_path.name}: weights already embedded — skipping")
+            continue
+
+        # Now load WITH external data to resolve all references
+        try:
+            model = onnx.load(str(onnx_path), load_external_data=True)
+        except Exception as e:
+            print(f"       {onnx_path.name}: could not load external data ({e})")
             continue
 
         # Re-save with all data embedded
@@ -343,25 +352,21 @@ def embed_external_weights(export_dir: Path):
                     embedded_path.unlink()
             else:
                 raise
+        del model
 
     # Clean up external data files (tensor files, .data files)
-    for f in export_dir.iterdir():
-        if f.suffix in (".data", ".weight") or (
-            f.is_file() and f.suffix == "" and f.name not in ("Makefile",)
-            and not f.name.startswith(".")
-            and f.name != "LICENSE"
-        ):
-            # Check if it looks like an external tensor file (no extension, not a known file)
-            try:
-                # If file is not JSON, ONNX, or known format, it's likely a tensor file
-                if f.suffix == "" and f.stat().st_size > 0:
-                    f.unlink()
-                    print(f"       Cleaned up external file: {f.name}")
-                elif f.suffix == ".data":
-                    f.unlink()
-                    print(f"       Cleaned up external file: {f.name}")
-            except Exception:
-                pass
+    for f in list(export_dir.iterdir()):
+        if f.suffix == ".data":
+            f.unlink()
+            print(f"       Cleaned up: {f.name}")
+        elif (f.is_file() and f.suffix == "" and f.suffix != ".onnx"
+              and f.name not in ("Makefile", "LICENSE")
+              and not f.name.startswith(".")
+              and not f.name.endswith(".json")):
+            # Likely an external tensor file (no extension, not a known file)
+            if f.stat().st_size > 0:
+                f.unlink()
+                print(f"       Cleaned up: {f.name}")
 
 
 def convert(version: str):
