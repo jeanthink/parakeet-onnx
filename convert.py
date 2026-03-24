@@ -21,8 +21,8 @@ from pathlib import Path
 
 # Model registry: version → HuggingFace model ID
 MODELS = {
-    "v2": "nvidia/parakeet-tdt-0.6b",
-    "v3": "nvidia/parakeet-tdt-0.6b-v2",
+    "v2": "nvidia/parakeet-tdt-0.6b-v2",
+    "v3": "nvidia/parakeet-tdt-0.6b-v3",
 }
 
 OUTPUT_DIR = Path("output")
@@ -43,12 +43,32 @@ def download_model(version: str):
     import nemo.collections.asr as nemo_asr
 
     hf_id = MODELS[version]
+    hf_token = os.environ.get("HF_TOKEN")
+
     print(f"[1/5] Downloading model: {hf_id}")
     print(f"       This may take several minutes on first run...")
 
-    model = nemo_asr.models.ASRModel.from_pretrained(model_name=hf_id)
-    print(f"       Model loaded: {type(model).__name__}")
-    return model
+    try:
+        model = nemo_asr.models.ASRModel.from_pretrained(
+            model_name=hf_id,
+            map_location="cpu",
+            token=hf_token,
+        )
+        print(f"       Model loaded: {type(model).__name__}")
+        return model
+    except Exception as e:
+        if "401" in str(e) or "Unauthorized" in str(e) or "authentication" in str(e).lower():
+            print(f"       ERROR: Authentication required for {hf_id}")
+            print(f"       This model requires accepting license terms on HuggingFace.")
+            print(f"       Please:")
+            print(f"       1. Visit: https://huggingface.co/{hf_id}")
+            print(f"       2. Accept the license terms")
+            print(f"       3. Create a HuggingFace token: https://huggingface.co/settings/tokens")
+            print(f"       4. Set HF_TOKEN environment variable or pass --token to this script")
+            sys.exit(1)
+        else:
+            print(f"       ERROR: Failed to download model: {e}")
+            sys.exit(1)
 
 
 def export_preprocessor(model, export_dir: Path):
